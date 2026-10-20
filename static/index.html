@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>/* 提前设主题，避免首屏闪烁（默认浅色） */(function(){try{var t=localStorage.getItem('qsb-theme')||'light';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<title>QSB Studio — 运筹学教学求解器</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">QSB<span>Studio</span></div>
+    <div class="brand-sub">运筹学教学求解器</div>
+    <nav id="module-nav" class="nav"></nav>
+    <div class="theme-toggle"><button id="theme-btn" class="btn small ghost">🌙 切换到深色</button></div>
+    <div class="sidebar-foot">自研 clean-room 实现 · 受 WinQSB 启发</div>
+  </aside>
+
+  <main class="main">
+    <!-- 线性规划（已实现） -->
+    <section id="view-lp" class="view">
+      <header class="view-head">
+        <h1>线性规划 <span class="en">Linear Programming</span></h1>
+        <p class="desc">建模后点击求解：看分步单纯形枢轴动画、2变量图解、最优解与影子价格（灵敏度）。</p>
+      </header>
+
+      <div id="lp-explain" class="explain-panel hidden"></div>
+
+      <div class="panel">
+        <div class="form-row">
+          <label class="f">
+            <span>目标</span>
+            <select id="lp-obj">
+              <option value="max">最大化 max</option>
+              <option value="min">最小化 min</option>
+            </select>
+            <small class="fhelp">max=求最大值，min=求最小值。</small>
+          </label>
+          <label class="f">
+            <span>变量数</span>
+            <input type="number" id="lp-nvar" value="2" min="1" max="40">
+            <small class="fhelp">决策变量个数 x₁…xₙ（要解出的未知数）。</small>
+          </label>
+          <label class="f">
+            <span>约束数</span>
+            <input type="number" id="lp-ncon" value="3" min="1" max="120">
+            <small class="fhelp">线性约束的条数（资源/条件限制）。</small>
+          </label>
+          <div class="spacer"></div>
+          <button id="lp-examples" class="btn ghost">载入示例</button>
+          <button id="lp-solve" class="btn primary">▶ 求解</button>
+        </div>
+        <p class="model-legend">
+          表格读法：<b>首行是目标函数</b>（要 max/min 的 Σ系数·变量）；<b>下面每行是一个约束</b>（Σ系数·变量 ≤/≥/= 右端常数）。
+          列头 <b>x₁…xₙ</b> 是决策变量，它正下方的每个数是该变量在对应行里的<b>系数</b>；最右两列是约束<b>类型</b>（≤/≥/=）和<b>右端常数 b</b>。所有变量默认 ≥ 0。
+        </p>
+        <div id="lp-model" class="model"></div>
+      </div>
+
+      <div id="lp-result" class="result hidden"></div>
+    </section>
+
+    <!-- 通用模块（动态表单 + 统一结果） -->
+    <section id="view-generic" class="view hidden">
+      <header class="view-head">
+        <h1 id="gen-title"></h1>
+        <p class="desc" id="gen-desc"></p>
+      </header>
+      <div id="gen-explain" class="explain-panel hidden"></div>
+      <div class="panel">
+        <div id="gen-form" class="gen-form"></div>
+        <div class="form-actions">
+          <button id="gen-solve" class="btn primary">▶ 求解</button>
+        </div>
+      </div>
+      <div id="gen-result" class="result hidden"></div>
+    </section>
+
+    <!-- 骨架模块 -->
+    <section id="view-stub" class="view hidden">
+      <header class="view-head">
+        <h1 id="stub-title"></h1>
+        <p class="desc" id="stub-desc"></p>
+      </header>
+      <div class="panel placeholder-panel">
+        <div class="ph-icon">🚧</div>
+        <div class="ph-title">该模块为骨架 —— 算法实现中</div>
+        <div class="ph-sub">19 模块骨架已就位；当前完整可用的是「线性规划」。</div>
+        <button id="stub-back" class="btn ghost">← 返回线性规划</button>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

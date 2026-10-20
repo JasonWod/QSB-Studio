@@ -1,0 +1,32 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ---- 虚拟环境（不要提交）----
+.venv/
+venv/
+env/
+
+# ---- 环境 / 密钥 ----
+.env
+*.env
+*.pem
+*.key
+
+# ---- 日志 / 临时 ----
+*.log
+logs/
+*.tmp
+*.swp
+
+# ---- 崩溃转储 ----
+core
+core.*
+
+# ---- IDE / 系统 ----
+.vscode/
+.idea/
+.DS_Store
