@@ -1,96 +1,126 @@
-"""最大流：Edmonds-Karp（BFS 增广路，O(VE²)）。"""
+"""最大流：Edmonds-Karp（BFS 找最短增广路，O(VE²)）+ 最小割。
+
+演示帧：每轮在剩余网络中用 BFS 找一条 s→t 增广路（高亮），按瓶颈容量增广，
+边标签显示「流量/容量」；最后标出最小割，验证「最大流 = 最小割」。
+"""
 from collections import deque
-from . import report as R
+
 from . import graphviz as GV
+from . import parse as P
+from . import report as R
 
 SPEC = {
-    "desc": "Edmonds-Karp 最大流：BFS 找增广路，反复增广直到没有。输入每行 u v 容量。",
+    "desc": "Edmonds-Karp 最大流：每轮用 BFS 在剩余网络中找边数最少的增广路，按路上最小剩余容量增广，"
+            "直到找不到增广路。最后给出最小割（最大流 = 最小割容量）。输入每行 u v 容量。",
     "form": [
         {"id": "edges", "type": "textarea", "label": "有向边 (每行: u v 容量)", "rows": 8,
-         "value": "0 1 16\n0 2 13\n1 2 10\n2 1 4\n1 3 12\n3 2 9\n3 4 20\n2 4 14"},
+         "value": "0 1 16\n0 2 13\n1 2 10\n2 1 4\n1 3 12\n3 2 9\n3 5 20\n2 4 14\n4 3 7\n4 5 4"},
         {"id": "source", "type": "int", "label": "源点", "value": "0"},
-        {"id": "sink", "type": "int", "label": "汇点", "value": "4"},
+        {"id": "sink", "type": "int", "label": "汇点", "value": "5"},
     ],
 }
 
 
-def _parse_edges(s):
-    out = []
-    for ln in (s or "").splitlines():
-        parts = [x for x in ln.replace(",", " ").split()]
-        if len(parts) >= 3:
-            out.append((int(float(parts[0])), int(float(parts[1])), float(parts[2])))
-    return out
-
-
 def solve(p):
-    raw = _parse_edges(p.get("edges"))
-    s = int(p.get("source", 0) or 0)
-    t = int(p.get("sink", -1) or -1)
-    nodes = {s, t}
-    for u, v, w in raw:
-        nodes.add(u); nodes.add(v)
-    n = max(nodes) + 1
+    raw = P.edges(p.get("edges"), what="有向边")
+    if not raw:
+        raise R.InputError("没有可解析的边，每行写 u v 容量。")
+    if any(w < 0 for _, _, w in raw):
+        raise R.InputError("容量不能为负。")
+    s = P.integer(p, "source", 0, "源点", 0)
+    t = P.integer(p, "sink", None, "汇点", 0)
+    if s == t:
+        raise R.InputError("源点和汇点不能相同。")
+    n = max([s, t] + [max(u, v) for u, v, _ in raw]) + 1
+    if n > 40:
+        raise R.InputError("教学版最多 40 个节点。")
     cap = [[0.0] * n for _ in range(n)]
     for u, v, w in raw:
         cap[u][v] += w
     flow = [[0.0] * n for _ in range(n)]
+    ids = list(range(n))
+    frames = []
+
+    def edge_flow(u, v):
+        return max(0.0, flow[u][v])
+
+    def snap(title, text, path_edges=(), cut=None):
+        pe = set(path_edges)
+        groups = []
+        for i in ids:
+            g = "src" if i == s else ("sink" if i == t else "default")
+            if cut is not None and i in cut and i not in (s,):
+                g = "done"
+            groups.append(g)
+        ed = []
+        for u, v, w in raw:
+            f = edge_flow(u, v)
+            if (u, v) in pe:
+                cls = "active"
+            elif cut is not None and u in cut and v not in cut:
+                cls = "reject"
+            else:
+                cls = "flow" if f > 1e-9 else "default"
+            ed.append((u, v, f"{R.fmt(f)}/{R.fmt(w)}", cls, f))
+        g = GV.circular_graph(ids, [str(i) for i in ids], groups, ed, directed=True)
+        frames.append(R.frame(title, text, graph=g))
+
+    snap("初始化", "所有边流量为 0。边上标签为「流量/容量」。")
     total = 0.0
-    # 记录 (u,v) 原始容量 + 最终流量，用于画图
-    base = {}
-    for u, v, w in raw:
-        base[(u, v)] = base.get((u, v), 0) + w
+    log = []
     while True:
-        level = [-1] * n; level[s] = 0
+        prev = [-1] * n
+        prev[s] = s
         q = deque([s])
-        while q and level[t] < 0:
+        while q and prev[t] < 0:
             u = q.popleft()
             for v in range(n):
-                if level[v] < 0 and (cap[u][v] - flow[u][v]) > 0:
-                    level[v] = level[u] + 1; q.append(v)
-        if level[t] < 0:
+                if prev[v] < 0 and cap[u][v] - flow[u][v] > 1e-12:
+                    prev[v] = u; q.append(v)
+        if prev[t] < 0:
             break
-        # 回溯找增广量
-        path_flow = float("inf"); v = t
-        while v != s:
-            u = max((x for x in range(n) if (cap[x][v] - flow[x][v]) > 0 and level[x] == level[v] - 1),
-                    default=-1)
-            if u < 0:
-                break
-            path_flow = min(path_flow, cap[u][v] - flow[u][v])
-            v = u
-        if path_flow == float("inf"):
+        path = [t]
+        while path[-1] != s:
+            path.append(prev[path[-1]])
+        path.reverse()
+        bott = min(cap[a][b] - flow[a][b] for a, b in zip(path, path[1:]))
+        for a, b in zip(path, path[1:]):
+            flow[a][b] += bott; flow[b][a] -= bott
+        total += bott
+        log.append(("→".join(map(str, path)), bott, total))
+        shown = [(a, b) if cap[a][b] > 0 else (b, a) for a, b in zip(path, path[1:])]
+        extra = "（含反向边：撤回部分已有流量）" if any(cap[a][b] <= 0 for a, b in zip(path, path[1:])) else ""
+        snap(f"第 {len(log)} 次增广", f"BFS 找到增广路 {'→'.join(map(str, path))}{extra}，路上最小剩余容量 = {R.fmt(bott)}，"
+             f"沿路推送 {R.fmt(bott)} 单位，当前总流量 {R.fmt(total)}。", path_edges=shown)
+        if len(log) > 500:
             break
-        v = t
-        while v != s:
-            u = max((x for x in range(n) if (cap[x][v] - flow[x][v]) > 0 and level[x] == level[v] - 1),
-                    default=-1)
-            if u < 0:
-                break
-            flow[u][v] += path_flow; flow[v][u] -= path_flow
-            v = u
-        total += path_flow
-    # 每条有向边 (u,v) 的净流量
-    rows = []
-    for u, v, w in raw:
-        f = flow[u][v] - flow[v][u]
-        rows.append([u, v, R.fmt(w), R.fmt(f)])
-    # ---- 网络图：有向，边粗细表流量 ----
-    edesc = []
-    for u, v, w in raw:
-        f = flow[u][v] - flow[v][u]
-        cls = "flow" if f > 1e-9 else "default"
-        edesc.append((u, v, f"{R.fmt(w)}" + (f"/{R.fmt(f)}" if f > 1e-9 else ""), cls, max(0.0, f)))
-    groups = ["default"] * n
-    groups[s] = "src"; groups[t] = "sink"
-    g = GV.circular_graph(list(range(n)), [str(i) for i in range(n)], groups, edesc, directed=True)
+    # 最小割：残量网络中从 s 可达的点集 S
+    S = {s}
+    q = deque([s])
+    while q:
+        u = q.popleft()
+        for v in range(n):
+            if v not in S and cap[u][v] - flow[u][v] > 1e-12:
+                S.add(v); q.append(v)
+    cut_edges = [(u, v, w) for u, v, w in raw if u in S and v not in S]
+    cut_val = sum(w for _, _, w in cut_edges)
+    snap("没有增广路了：最大流与最小割",
+         f"剩余网络中从源点出发只能到达 {{{', '.join(map(str, sorted(S)))}}}（绿色）。从这些点指向其余点的边（红色）"
+         f"构成最小割，容量 {R.fmt(cut_val)} = 最大流 {R.fmt(total)}。", cut=S)
+    rows = [[u, v, R.fmt(w), R.fmt(edge_flow(u, v))] for u, v, w in raw]
     return R.report("optimal", headline=f"最大流 = {R.fmt(total)}",
-                    tables=[R.table("边流量 (前向边)", ["u", "v", "容量", "流量"], rows)],
-                    notes=["Edmonds-Karp：每次用 BFS 找一条可增广路（最短增广路），增广量取路上残差最小值。"],
-                    graph=g)
+                    tables=[R.table("增广记录", ["次", "增广路", "增广量", "累计流量"],
+                                    [[i + 1, a, R.fmt(b), R.fmt(c)] for i, (a, b, c) in enumerate(log)]),
+                            R.table("边流量", ["u", "v", "容量", "流量"], rows),
+                            R.table("最小割", ["u", "v", "容量"], [[u, v, R.fmt(w)] for u, v, w in cut_edges]
+                                    + [["", "合计", R.fmt(cut_val)]])],
+                    notes=["Edmonds-Karp：每次用 BFS 找边数最少的增广路，保证多项式时间。",
+                           "最大流最小割定理：最大流量 = 最小割容量。"],
+                    graph=frames[-1]["graph"], steps=frames)
 
 
 if __name__ == "__main__":
-    r = solve({"edges": SPEC["form"][0]["value"], "source": 0, "sink": 4})
+    r = solve({f["id"]: f["value"] for f in SPEC["form"]})
     print(r["headline"])
-    print("graph nodes:", len(r["graph"]["nodes"]), "edges:", len(r["graph"]["edges"]))
+    for f in r["steps"]:
+        print(" ", f["title"], "|", f["text"][:120])
