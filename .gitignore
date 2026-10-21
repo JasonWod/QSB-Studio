@@ -30,3 +30,10 @@ core.*
 .vscode/
 .idea/
 .DS_Store
+
+# ---- 打包产物 ----
+build/
+dist/
+packaging/.cache/
+packaging/launcher/payload.zip
+packaging/launcher/*.syso
