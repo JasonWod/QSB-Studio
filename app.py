@@ -12,9 +12,13 @@ app.py — QSB Studio 服务入口（纯 Python 标准库，无需安装任何�
     python3 app.py --port 8000                # 浏览器打开 http://127.0.0.1:8000
     python3 app.py --host 0.0.0.0 --port 8000 # 机房局域网共享（注意防火墙）
 
-桌面模式（打包后的应用双击时使用）：
+桌面模式（在默认浏览器中打开）：
     python3 app.py --desktop
-  自动选空闲端口、打开浏览器；已在运行时只打开浏览器；页面全部关闭约 3 分钟后自动退出。
+  自动选端口、打开浏览器；已在运行时只打开浏览器；页面全部关闭约 3 分钟后自动退出。
+
+原生窗口（打包后的应用使用）：
+    python3 app.py --native                 # macOS：进程内创建 WKWebView 窗口，失败时回退到浏览器
+    python3 app.py --embedded --port-file F # 供 Windows 启动器使用：只起服务，把端口写入 F，由启动器开 WebView2 窗口
 """
 from __future__ import annotations
 
@@ -45,11 +49,14 @@ mimetypes.add_type("image/svg+xml", ".svg")
 
 
 class State:
-    desktop = False
+    desktop = False         # 允许 /api/quit（桌面 / 窗口模式）
+    mode = "server"         # server | browser | window（原生窗口内）
+    on_quit = None          # 原生窗口模式下退出时回调（关闭窗口、结束事件循环）
     last_ping = time.time()
     seen_page = False
     server: ThreadingHTTPServer | None = None
     loopback = True
+    stopped = threading.Event()   # 服务完全停止时置位
 
 
 def _state_dir():
@@ -114,8 +121,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(*api.module_list())
         if path == "/api/ping":
             State.last_ping = time.time()
+            if not State.seen_page:
+                log.info("页面已连接（%s）", self.headers.get("User-Agent", "")[:120])
             State.seen_page = True
-            return self._json(200, {"ok": True, "desktop": State.desktop, "version": VERSION})
+            return self._json(200, {"ok": True, "desktop": State.desktop, "mode": State.mode, "version": VERSION})
         if path.startswith("/api/"):
             return self._json(404, {"detail": "not found"})
         return self._static(path)
@@ -160,14 +169,34 @@ class Handler(BaseHTTPRequestHandler):
 
 def _shutdown():
     time.sleep(0.3)
+    if State.on_quit:
+        try:
+            State.on_quit()
+        except Exception:  # noqa: BLE001
+            log.exception("退出回调失败")
     if State.server:
         State.server.shutdown()
+
+
+PREFERRED_PORT = 47815      # 固定端口：浏览器存储按「协议+主机+端口」隔离，端口固定才能记住主题与上次输入
 
 
 def _free_port(host):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind((host, 0))
         return s.getsockname()[1]
+
+
+def _bind(host, port):
+    """绑定端口；port=None 时先试固定端口，被占用再随机选。"""
+    for p in ([port] if port else [PREFERRED_PORT, 0]):
+        try:
+            srv = ThreadingHTTPServer((host, p), Handler)
+            srv.daemon_threads = True
+            return srv
+        except OSError as e:
+            last = e
+    raise last
 
 
 def _existing_instance():
@@ -185,7 +214,7 @@ def _existing_instance():
 
 
 def _watchdog(idle_timeout, first_timeout):
-    """桌面模式：页面关闭（心跳停止）一段时间后自动退出，避免后台残留进程。"""
+    """页面关闭（心跳停止）一段时间后自动退出，避免后台残留进程。"""
     start = time.time()
     while True:
         time.sleep(5)
@@ -199,24 +228,90 @@ def _watchdog(idle_timeout, first_timeout):
     _shutdown()
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(description="QSB Studio 运筹学教学工作台")
-    ap.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机；0.0.0.0 可局域网访问）")
-    ap.add_argument("--port", type=int, default=8000, help="端口（0 = 自动选择空闲端口）")
-    ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
-    ap.add_argument("--desktop", action="store_true", help="桌面模式：单实例、自动端口、自动开浏览器、页面关闭后退出")
-    ap.add_argument("--log-file", default=None, help="日志文件路径（桌面模式默认写到用户数据目录）")
-    ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args(argv)
-
-    log_file = args.log_file or (os.path.join(_state_dir(), "qsb-studio.log") if args.desktop else None)
+def _setup_logging(log_file, verbose):
     handlers = []
     if log_file:
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
     if sys.stderr is not None:
         handlers.append(logging.StreamHandler())
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", handlers=handlers or [logging.NullHandler()])
+
+
+def _write_state(port):
+    with open(os.path.join(_state_dir(), "server.json"), "w", encoding="utf-8") as f:
+        json.dump({"port": port, "pid": os.getpid(), "mode": State.mode}, f)
+
+
+def _clear_state():
+    try:
+        os.remove(os.path.join(_state_dir(), "server.json"))
+    except OSError:
+        pass
+
+
+def _serve():
+    try:
+        State.server.serve_forever(poll_interval=0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        State.server.server_close()
+        State.stopped.set()
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="QSB Studio 运筹学教学工作台")
+    ap.add_argument("--host", default="127.0.0.1", help="监听地址（默认仅本机；0.0.0.0 可局域网访问）")
+    ap.add_argument("--port", type=int, default=8000, help="端口（0 = 自动选择空闲端口）")
+    ap.add_argument("--open", action="store_true", help="启动后自动打开浏览器")
+    ap.add_argument("--desktop", action="store_true", help="桌面模式：在默认浏览器中打开，页面关闭后退出")
+    ap.add_argument("--native", action="store_true", help="原生窗口模式（macOS）")
+    ap.add_argument("--embedded", action="store_true", help="嵌入模式：供 Windows 原生窗口启动器调用")
+    ap.add_argument("--port-file", default=None, help="嵌入模式下把实际端口写入该文件")
+    ap.add_argument("--log-file", default=None, help="日志文件路径（桌面 / 原生模式默认写到用户数据目录）")
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args(argv)
+
+    app_mode = args.desktop or args.native or args.embedded
+    _setup_logging(args.log_file or (os.path.join(_state_dir(), "qsb-studio.log") if app_mode else None), args.verbose)
+
+    if args.native or args.embedded:
+        State.desktop, State.mode = True, "window"
+        try:
+            State.server = _bind("127.0.0.1", None)
+        except OSError as e:
+            log.error("无法启动本地服务：%s", e)
+            return 1
+        port = State.server.server_address[1]
+        url = f"http://127.0.0.1:{port}"
+        log.info("QSB Studio %s 已启动（%s）：%s", VERSION, "原生窗口" if args.native else "嵌入模式", url)
+        if args.embedded:
+            if args.port_file:
+                tmp = args.port_file + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(str(port))
+                os.replace(tmp, args.port_file)
+            # 兜底：启动器异常退出而窗口已不在时，心跳停止后自动退出
+            threading.Thread(target=_watchdog, args=(180, 90), daemon=True).start()
+            _serve()
+            return 0
+        threading.Thread(target=_serve, daemon=True).start()
+        try:
+            import native_mac
+            native_mac.run(url, VERSION, BASE, State)          # 阻塞直到窗口关闭
+            log.info("原生窗口已关闭，退出")
+            State.server.shutdown()
+            return 0
+        except Exception:  # noqa: BLE001 — 原生窗口不可用时回退到浏览器
+            log.exception("原生窗口启动失败，改用默认浏览器打开")
+            State.mode = "browser"
+            _write_state(port)
+            threading.Thread(target=_watchdog, args=(180, 120), daemon=True).start()
+            webbrowser.open(url)
+            State.stopped.wait()
+            _clear_state()
+            return 0
 
     if args.desktop:
         url = _existing_instance()
@@ -224,37 +319,29 @@ def main(argv=None):
             log.info("已有实例在运行：%s", url)
             webbrowser.open(url)
             return 0
-        State.desktop = True
-        args.host, args.port, args.open = "127.0.0.1", 0, True
+        State.desktop, State.mode = True, "browser"
+        args.host, args.open = "127.0.0.1", True
 
     State.loopback = args.host in ("127.0.0.1", "localhost", "::1")
-    port = args.port or _free_port(args.host)
     try:
-        State.server = ThreadingHTTPServer((args.host, port), Handler)
+        State.server = _bind(args.host, None if args.desktop else (args.port or _free_port(args.host)))
     except OSError as e:
-        log.error("无法监听 %s:%s（%s）。端口可能被占用，换一个 --port 试试。", args.host, port, e)
+        log.error("无法监听 %s:%s（%s）。端口可能被占用，换一个 --port 试试。", args.host, args.port, e)
         return 1
-    State.server.daemon_threads = True
+    port = State.server.server_address[1]
     shown_host = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
     url = f"http://{shown_host}:{port}"
     log.info("QSB Studio %s 已启动：%s", VERSION, url)
     if State.desktop:
-        with open(os.path.join(_state_dir(), "server.json"), "w", encoding="utf-8") as f:
-            json.dump({"port": port, "pid": os.getpid()}, f)
+        _write_state(port)
         threading.Thread(target=_watchdog, args=(180, 120), daemon=True).start()
     if args.open:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
-        State.server.serve_forever(poll_interval=0.5)
-    except KeyboardInterrupt:
-        pass
+        _serve()
     finally:
-        State.server.server_close()
         if State.desktop:
-            try:
-                os.remove(os.path.join(_state_dir(), "server.json"))
-            except OSError:
-                pass
+            _clear_state()
     return 0
 
 

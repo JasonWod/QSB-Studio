@@ -1,7 +1,8 @@
-// QSB Studio 启动器：把内嵌的「Python 运行时 + 程序」解压到用户数据目录，然后以桌面模式启动。
+// QSB Studio 启动器：把内嵌的「Python 运行时 + 程序」解压到用户数据目录，然后启动应用。
 //
-// 首次运行（或版本更新后）解压一次，之后直接启动。解压目录按载荷哈希区分版本，
-// 旧版本目录会被顺手清理。Windows 下编译为 GUI 程序（不弹黑色控制台窗口）。
+// Windows：打开原生 WebView2 窗口（app_windows.go）；其他系统：以浏览器桌面模式启动（app_other.go，
+// 仅用于在 Linux 上验证打包流程）。首次运行（或版本更新后）解压一次，解压目录按载荷哈希区分版本，
+// 旧版本目录会被顺手清理。
 package main
 
 import (
@@ -11,11 +12,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 )
 
 //go:embed payload.zip
@@ -145,23 +144,5 @@ func main() {
 			"\n\n请确认磁盘空间充足、该目录可写，或以普通用户身份重试。")
 		return
 	}
-	logFile := filepath.Join(dataRoot(), "qsb-studio.log")
-	cmd := exec.Command(pythonPath(dir), "-I", filepath.Join(dir, "app", "app.py"), "--desktop", "--log-file", logFile)
-	cmd.Dir = filepath.Join(dir, "app")
-	hideWindow(cmd)
-	if err := cmd.Start(); err != nil {
-		fail("无法启动内置 Python：" + err.Error())
-		return
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case err := <-done:
-		// 已有实例在运行时 app.py 会打开浏览器后立即正常退出，这不是错误
-		if err != nil {
-			fail("QSB Studio 启动后意外退出：" + err.Error() + "\n\n详细信息见日志：\n" + logFile)
-		}
-	case <-time.After(4 * time.Second):
-		// 正常运行中：启动器退出，服务在后台继续，浏览器页面关闭约 3 分钟后自动退出
-	}
+	runApp(dir, filepath.Join(dataRoot(), "qsb-studio.log"))
 }

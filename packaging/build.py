@@ -127,12 +127,17 @@ def _rm(p):
         shutil.rmtree(p)
 
 
-def stage_app(dest):
-    """复制程序文件，并用当前解释器预编译（.pyc 与平台无关，但必须同一 Python 小版本才会被采用）。"""
+def stage_app(dest, mac=False):
+    """复制程序文件。mac=True 时附带原生窗口模块 native_mac.py 与内置的 rubicon-objc。"""
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(os.path.join(dest, "qsb")); os.makedirs(os.path.join(dest, "static"))
     shutil.copy2(os.path.join(ROOT, "app.py"), dest)
+    if mac:
+        shutil.copy2(os.path.join(ROOT, "native_mac.py"), dest)
+        shutil.copytree(os.path.join(ROOT, "vendor"), os.path.join(dest, "vendor"),
+                        ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(os.path.join(ROOT, "LICENSE"), dest)
+    shutil.copy2(os.path.join(ROOT, "THIRD_PARTY_NOTICES.md"), dest)
     for f in os.listdir(os.path.join(ROOT, "qsb")):
         if f.endswith(".py"):
             shutil.copy2(os.path.join(ROOT, "qsb", f), os.path.join(dest, "qsb"))
@@ -249,7 +254,8 @@ def build_payload(runtime_triple, out_zip):
 
 
 def go_build(goos, out, pid):
-    env = dict(os.environ, GOOS=goos, GOARCH="amd64", CGO_ENABLED="0")
+    env = dict(os.environ, GOOS=goos, GOARCH="amd64", CGO_ENABLED="0",
+               GOFLAGS="-mod=mod", GOPROXY="off", GOSUMDB="off")   # 依赖源码在 launcher/third_party
     subprocess.run(["go", "build", "-trimpath", "-ldflags",
                     f"-s -w -X main.payloadID={pid}" + (" -H windowsgui" if goos == "windows" else ""),
                     "-o", out, "."], cwd=os.path.join(PKG, "launcher"), env=env, check=True)
@@ -272,14 +278,14 @@ def build_windows():
 
 
 MAC_LAUNCHER = """#!/bin/bash
-# QSB Studio 启动脚本：按芯片架构选择内置 Python，以桌面模式启动（自动打开浏览器）
+# QSB Studio 启动脚本：按芯片架构选择内置 Python，以原生窗口模式启动（失败时自动改用浏览器）
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 case "$(uname -m)" in
   arm64) PY="$HERE/Resources/python-arm64/bin/python3" ;;
   *)     PY="$HERE/Resources/python-x86_64/bin/python3" ;;
 esac
 export PYTHONDONTWRITEBYTECODE=1
-exec "$PY" -I "$HERE/Resources/app/app.py" --desktop
+exec "$PY" -I "$HERE/Resources/app/app.py" --native
 """
 
 INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
@@ -296,7 +302,7 @@ INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <key>LSUIElement</key><true/>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSHumanReadableCopyright</key><string>MIT License · JasonWod</string>
 </dict>
@@ -312,8 +318,7 @@ MAC_README = """QSB Studio for macOS
    · 在 Finder 里右键（或按住 Control 点按）应用 →「打开」→ 再点「打开」；
    · 或 macOS 15 及以上：先双击一次，再到「系统设置 → 隐私与安全性」底部点「仍要打开」；
    · 或在「终端」执行：xattr -dr com.apple.quarantine "/Applications/QSB Studio.app"
-3. 打开后会自动在默认浏览器中显示 QSB Studio。程序没有 Dock 图标，在网页左下角点「退出程序」即可退出；
-   关闭网页约 3 分钟后也会自动退出。
+3. 打开后是一个独立窗口，用法和普通 Mac 应用一样：⌘W 关闭窗口即退出，⌘Q 退出，⌃⌘F 全屏。
 
 支持 Apple 芯片（M 系列）与 Intel 芯片的 Mac，需要 macOS 11 或更高版本。
 """
@@ -327,7 +332,7 @@ def build_macos():
     os.makedirs(os.path.join(contents, "MacOS")); os.makedirs(res)
     unpack_runtime("aarch64-apple-darwin", os.path.join(res, "python-arm64"))
     unpack_runtime("x86_64-apple-darwin", os.path.join(res, "python-x86_64"))
-    stage_app(os.path.join(res, "app"))
+    stage_app(os.path.join(res, "app"), mac=True)
     make_icns(os.path.join(res, "AppIcon.icns"))
     exe = os.path.join(contents, "MacOS", "QSBStudio")
     with open(exe, "w", newline="\n") as f:
@@ -358,6 +363,7 @@ def verify_linux():
         os.remove(os.path.join(launcher, "payload.zip"))
     py = os.path.join(stage, "runtime", "bin", "python3")
     shutil.copytree(os.path.join(ROOT, "tests"), os.path.join(stage, "app", "tests"), dirs_exist_ok=True)
+    shutil.copy2(os.path.join(ROOT, "native_mac.py"), os.path.join(stage, "app"))   # 原生窗口流程测试需要
     r = subprocess.run([py, "-I", "-m", "unittest", "discover", "-s", "tests"], cwd=os.path.join(stage, "app"),
                        capture_output=True, text=True)
     log("裁剪后运行时跑测试：", r.stderr.strip().splitlines()[-1])
