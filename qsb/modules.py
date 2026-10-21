@@ -12,8 +12,11 @@ qsb/modules.py — 19 个运筹学模块注册表。
 """
 from __future__ import annotations
 import importlib
+import logging
 from . import lp
 from . import explain as EXPL
+
+log = logging.getLogger("qsb")
 
 
 # 产出「网络图」可视化的模块（前端据此可优先画网络图）
@@ -24,17 +27,20 @@ _GRAPH_MODS = {"shortest", "mst", "maxflow", "tsp", "transport", "assign"}
 # LP —— 唯一定制前端
 # ---------------------------------------------------------------------------
 def _lp_solve(payload):
-    return lp.solve_lp(
-        payload["obj"], payload["c"], payload["A"], payload["b"],
-        payload["senses"], payload["var_names"],
-    )
+    keys = ("obj", "c", "A", "b", "senses")
+    missing = [k for k in keys if k not in payload]
+    if missing:
+        raise lp.LPInputError(f"缺少字段：{', '.join(missing)}")
+    names = payload.get("var_names") or [f"x{i + 1}" for i in range(len(payload["c"]))]
+    return lp.solve_lp(payload["obj"], payload["c"], payload["A"], payload["b"], payload["senses"], names)
 
 
 def _lp_graph(payload, result):
-    return lp.graph_2var(
-        payload["c"], payload["A"], payload["b"], payload["senses"],
-        payload["var_names"], result["solution"], payload["obj"],
-    )
+    if result.get("status") != "optimal":
+        return None
+    names = payload.get("var_names") or [f"x{i + 1}" for i in range(len(payload["c"]))]
+    return lp.graph_2var(payload["c"], payload["A"], payload["b"], payload["senses"],
+                         names, result["solution"], payload["obj"])
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +63,8 @@ def _reg(mid, name, name_en, desc, category, icon):
             "desc": desc, "category": category, "icon": icon}
     try:
         mod = importlib.import_module(f"qsb.{mid}")
-    except Exception:
+    except Exception:  # 记录下来，避免模块悄悄降级成骨架而无人察觉
+        log.exception("模块 %s 加载失败，降级为骨架", mid)
         mod = None
     if mod is not None and hasattr(mod, "solve") and hasattr(mod, "SPEC"):
         base.update({
@@ -77,7 +84,7 @@ def _reg(mid, name, name_en, desc, category, icon):
 MODULES = [
     {
         "id": "lp", "name": "线性规划", "name_en": "Linear Programming",
-        "desc": "大M单纯形法，逐步枢轴迭代；2变量图解；影子价格（灵敏度）。支持 max/min、≤/≥/=、连续非负变量。",
+        "desc": "大M单纯形法（退化时自动用 Bland 规则防循环），逐步枢轴动画；2变量图解；影子价格与灵敏度分析。",
         "category": "优化", "status": "ready", "has_graph": True, "icon": "📊",
         "explain": EXPL.EXPLAIN.get("lp", ""),
         "solve": _lp_solve, "graph": _lp_graph,

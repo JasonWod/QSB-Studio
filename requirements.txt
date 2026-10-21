@@ -1,2 +1,2 @@
-fastapi
-uvicorn
+# QSB Studio 只依赖 Python 标准库（3.9+），无需安装任何第三方包。
+# 直接运行：python3 app.py

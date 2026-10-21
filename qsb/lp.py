@@ -153,40 +153,55 @@ def _pivot(d, enter, leave):
     return nbasis, nN, newconst, newcoef, nrc, nz0
 
 
-def _simplex_dict(A_ext, b, c_mod, basis0, col_names, max_iter=20000):
+MAX_ITER = 5000
+TOL_RC = 1e-7
+
+
+def _simplex_dict(A_ext, b, c_mod, basis0, col_names, max_iter=MAX_ITER):
+    """字典法单纯形（max）。
+
+    进基规则：平时用 Dantzig 规则（最大检验数，教学上最直观）；一旦出现退化枢轴
+    （最小比值为 0，目标值不变）就切换到 Bland 规则（最小下标进基、比值相同时最小下标离基），
+    直到出现一次非退化枢轴再切回。Bland 规则保证退化段内不会循环，非退化枢轴严格改善目标，
+    因此整个过程必然在有限步内终止。达到 max_iter 时返回 iteration_limit，绝不冒充最优。
+    """
     d = _make_dict(A_ext, b, c_mod, basis0, col_names)
-    steps = []
-    steps.append(_snapshot(d, col_names, "init"))
+    steps = [_snapshot(d, col_names, "init")]
     it = 0
-    status = "optimal"
+    status = "iteration_limit"
+    bland = False
     while it < max_iter:
         it += 1
-        N = d[1]
-        # 进基：max 下最大正检验数
-        enter, best = -1, EPS
-        for j in N:
-            if d[4][j] > best:
-                best, enter = d[4][j], j
-        if enter == -1:
+        basis, N, const, coef, rc, z0 = d
+        cand = [j for j in N if rc[j] > TOL_RC]
+        if not cand:
             status = "optimal"
             break
-        # 离基：最小比值（coef[base][enter] > 0）
+        if bland:
+            enter = min(cand)
+        else:
+            enter = max(cand, key=lambda j: (rc[j], -j))
+        # 离基：最小比值（coef[base][enter] > 0），比值相同取下标最小者
         leave, lb = -1, None
-        for base in d[0]:
-            cbe = d[3][base].get(enter, 0.0)
+        for base in basis:
+            cbe = coef[base].get(enter, 0.0)
             if cbe > EPS:
-                r = d[2][base] / cbe
-                if lb is None or r < lb:
+                r = const[base] / cbe
+                if lb is None or r < lb - 1e-12 or (abs(r - lb) <= 1e-12 and base < leave):
                     lb, leave = r, base
         if leave == -1:
             status = "unbounded"
             break
+        degenerate = lb <= 1e-10
+        rule = "Bland" if bland else "Dantzig"
         d = _pivot(d, enter, leave)
-        steps.append(_snapshot(d, col_names, "pivot", enter, col_names[enter], col_names[leave]))
+        steps.append(_snapshot(d, col_names, "pivot", enter, col_names[enter], col_names[leave],
+                               rule, degenerate))
+        bland = degenerate
     return status, d, steps
 
 
-def _snapshot(d, col_names, phase, enter=None, ename=None, lname=None):
+def _snapshot(d, col_names, phase, enter=None, ename=None, lname=None, rule=None, degenerate=False):
     basis, N, const, coef, rc, z0 = d
     rows = []
     for base in basis:
@@ -211,7 +226,8 @@ def _snapshot(d, col_names, phase, enter=None, ename=None, lname=None):
         "objective_value": _clean(z0),
     }
     if phase == "pivot":
-        snap["pivot"] = {"enter": ename, "leave": lname, "row": basis.index(enter)}
+        snap["pivot"] = {"enter": ename, "leave": lname, "row": basis.index(enter),
+                         "rule": rule, "degenerate": degenerate}
     return snap
 
 
@@ -347,7 +363,44 @@ def _sensitivity(A_ext, b, c_true, basis, col_names, n, obj, A2, b2, c_orig, art
 # ---------------------------------------------------------------------------
 # 对外接口
 # ---------------------------------------------------------------------------
-def solve_lp(obj, c, A, b, senses, var_names, M=1e6):
+class LPInputError(ValueError):
+    pass
+
+
+def validate(obj, c, A, b, senses, var_names, max_vars=40, max_cons=120):
+    """检查 LP 输入维度，返回错误说明（None 表示合法）。"""
+    if obj not in ("max", "min"):
+        return "目标方向必须是 max 或 min。"
+    n, m = len(c), len(A)
+    if n == 0:
+        return "至少需要 1 个决策变量。"
+    if m == 0:
+        return "至少需要 1 条约束。"
+    if n > max_vars or m > max_cons:
+        return f"规模超过教学版上限（变量 ≤ {max_vars}，约束 ≤ {max_cons}）。"
+    if len(b) != m or len(senses) != m:
+        return "约束系数、右端常数、约束类型的条数不一致。"
+    if any(len(row) != n for row in A):
+        return f"每条约束都应有 {n} 个系数（与变量个数一致）。"
+    if any(s not in ("le", "ge", "eq") for s in senses):
+        return "约束类型只能是 le(≤) / ge(≥) / eq(=)。"
+    if len(var_names) != n:
+        return "变量名个数与变量个数不一致。"
+    vals = list(c) + list(b) + [v for row in A for v in row]
+    try:
+        if any(not (abs(float(v)) < 1e12) for v in vals):
+            return "系数中有非有限值或过大的数（|值| 须 < 1e12）。"
+    except (TypeError, ValueError):
+        return "系数必须全部是数字。"
+    return None
+
+
+def solve_lp(obj, c, A, b, senses, var_names, M=None):
+    err = validate(obj, c, A, b, senses, var_names)
+    if err:
+        raise LPInputError(err)
+    if M is None:   # 大 M 随目标系数量级自适应，保证足够「大」又不至于吃掉浮点精度
+        M = 1e5 * max(1.0, max(abs(float(x)) for x in c))
     # 右端标准化非负
     A2 = [list(map(float, row)) for row in A]
     b2 = [float(x) for x in b]
@@ -378,7 +431,21 @@ def solve_lp(obj, c, A, b, senses, var_names, M=1e6):
         col = i
         sol[var_names[i]] = _clean(const[col]) if col in set(basis) else 0.0
 
-    objective = _clean(-z0) if obj == "min" else _clean(z0)
+    # 真实目标值直接用原始 c 计算（不依赖求解方向与大 M 项，min/max 都不会变号）
+    objective = _clean(sum(float(c[i]) * float(sol[var_names[i]]) for i in range(n))) \
+        if status == "optimal" else None
+
+    # 每一步的「当前基可行解」与真实目标值，供前端动画解说（大 M 的人工变量单独提示）
+    for st in steps:
+        cols = st["columns"]
+        xs = []
+        for k in range(n):
+            nm = col_names[k]
+            xs.append(st["rows"][st["basis"].index(nm)][len(cols)] if nm in st["basis"] else 0.0)
+        st["x"] = [_clean(v) for v in xs]
+        st["real_objective"] = _clean(sum(float(c[k]) * xs[k] for k in range(n)))
+        st["artificial_in_basis"] = [nm for nm in st["basis"] if col_names.index(nm) in art_cols
+                                     and abs(st["rows"][st["basis"].index(nm)][len(cols)]) > 1e-9]
 
     # 影子价格：用真目标符号（max 用 c，min 用 c；但求解是 -c，对偶需按求解方向，这里按 max 约定）
     y = _dual_shadow(A_ext, b_ext, c_true if obj == "max" else [-x for x in c_true], basis)
@@ -407,7 +474,10 @@ def solve_lp(obj, c, A, b, senses, var_names, M=1e6):
     return {
         "status": status,
         "objective": objective,
-        "objective_value_display": _clean(z0),
+        "objective_value_display": objective,
+        "message": {"infeasible": "问题不可行：没有任何点能同时满足所有约束。",
+                    "unbounded": "问题无界：目标值可以无限改善。",
+                    "iteration_limit": f"单纯形迭代超过 {MAX_ITER} 次仍未结束，已停止（结果不可信）。"}.get(status),
         "solution": sol,
         "steps": steps,
         "final_tableau": {
@@ -420,6 +490,7 @@ def solve_lp(obj, c, A, b, senses, var_names, M=1e6):
         "reduced_costs": reduced,
         "sensitivity": sensitivity,
         "num_pivots": len(steps) - 1,
+        "big_m": M,
     }
 
 
@@ -453,7 +524,7 @@ def graph_2var(c, A, b, senses, var_names, solution, obj):
     iso = {"slope": -float(c[0]) / float(c[1]), "through": opt} if abs(c[1]) > 1e-12 else None
     zval = c[0] * opt[0] + c[1] * opt[1]
     return {"lines": lines, "vertices": vertices, "optimum": opt, "iso_line": iso,
-            "objective_value": zval if obj == "max" else -zval}
+            "objective_value": zval}
 
 
 def _feasible(x1, x2, A, b, senses, eps=1e-6):
