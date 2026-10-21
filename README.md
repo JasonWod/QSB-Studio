@@ -25,14 +25,22 @@ QSB Studio 解决运筹学课上「答案抄得会，过程看不懂」的问题
 | Windows 10/11 (64 位) | `QSB-Studio-Windows-x64.exe` | 双击运行。首次运行约需几秒解压，之后秒开。 |
 | macOS 11+（Apple 芯片与 Intel 通用） | `QSB-Studio-macOS.zip` | 解压后把「QSB Studio.app」拖进「应用程序」。 |
 
-程序会在默认浏览器中打开界面（数据全部在本机计算，不联网）。在页面左下角点「退出程序」即可退出；
-关闭浏览器页面约 3 分钟后程序也会自动退出。
+双击即打开一个独立窗口，和普通桌面软件一样使用，关闭窗口即退出。应用内置 Python 运行时，界面使用系统自带的
+WebView2（Windows）/ WebKit（macOS）显示，不需要安装任何东西，也不联网——所有计算都在本机完成。
 
 **首次打开的安全提示**：应用未购买代码签名证书，系统会提示一次：
 - Windows：「Windows 已保护你的电脑」→ 点「更多信息」→「仍要运行」。
 - macOS：右键（或按住 Control 点按）应用 →「打开」→「打开」；macOS 15 起若无此选项，先双击一次，
   再到「系统设置 → 隐私与安全性」点「仍要打开」。也可在终端执行
   `xattr -dr com.apple.quarantine "/Applications/QSB Studio.app"`。
+
+## 界面
+
+- **工作台布局**：左侧模块栏（可搜索、可收起）、中间输入区、右侧演示舞台；输入区与舞台之间的分隔线可拖动，宽度按模块记忆。
+- **打开即演示**：进入模块会自动求解示例题；输入自动保存，下次打开还在；「恢复示例」一键还原。
+- **舞台分页**：演示（逐步播放）/ 结果 / 原理（本题要点与算法说明）；线性规划另有灵敏度分页。
+- **上课投影**：「演示全屏」隐藏输入区与侧栏；显示大小可在 80%–160% 间调节；「黑板」深色主题适合投影。
+- **快捷键**：`Ctrl/⌘ + Enter` 求解，`Ctrl/⌘ + K` 搜索模块，`← →` 逐步，空格播放，`F` 演示全屏，`?` 查看全部。
 
 ## 模块覆盖（19 个，全部带动态演示）
 
@@ -64,7 +72,8 @@ QSB Studio 解决运筹学课上「答案抄得会，过程看不懂」的问题
 
 ```bash
 python3 app.py                      # 打开 http://127.0.0.1:8000
-python3 app.py --desktop            # 桌面模式：自动选端口、打开浏览器、页面关闭后自动退出
+python3 app.py --desktop            # 在默认浏览器中打开，页面关闭后自动退出
+python3 app.py --native             # macOS：原生窗口（需要源码中的 vendor/ 目录）
 python3 app.py --host 0.0.0.0 --port 8000   # 机房局域网共享（请配合防火墙使用）
 ```
 
@@ -86,11 +95,18 @@ python3 packaging/build.py            # 产物在 dist/
 
 在 Linux、macOS 或 Windows 上都能构建两个平台的应用，不需要目标系统：程序只依赖 Python 标准库，
 所以直接内置 [python-build-standalone](https://github.com/astral-sh/python-build-standalone) 的独立运行时
-（下载后做 SHA256 校验，并裁剪掉 Tk、测试包等无用组件），Windows 启动器用 Go 交叉编译成单个 exe。
-需要 Go 1.21+；装有 `llvm-rc`/`llvm-cvtres` 时会给 exe 嵌入图标与版本信息。
+（下载后做 SHA256 校验，并裁剪掉 Tk、测试包等无用组件）。
 
-推送 `v*` 标签时，GitHub Actions 会自动构建，并在真实的 Windows、Apple 芯片 Mac 与 Intel Mac 上启动应用做冒烟测试，
-通过后把两个文件发布到 Releases。
+- **Windows**：Go 编写的启动器（交叉编译、无需 C 编译器）创建 WebView2 原生窗口，后台服务进程放在 Job 对象中，
+  关窗或启动器异常退出时自动结束；系统缺少 WebView2 时自动改用浏览器。
+- **macOS**：进程内通过 rubicon-objc（纯 Python，调用系统 Objective-C 运行时）创建 WKWebView 窗口，带原生菜单
+  （拷贝粘贴、全屏、⌘W / ⌘Q），记住窗口位置；失败时自动改用浏览器。
+
+需要 Go 1.21+（第三方 Go 依赖已随仓库保存在 `packaging/launcher/third_party/`，可离线构建）；
+装有 `llvm-rc`/`llvm-cvtres` 时会给 exe 嵌入图标与版本信息。第三方组件许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+每个 Pull Request 都会触发自动构建，并在真实的 Windows、Apple 芯片 Mac 与 Intel Mac 上启动应用，
+检查原生窗口是否创建、页面是否加载、求解是否正常；推送 `v*` 标签时，通过后把两个文件发布到 Releases。
 
 ## HTTP API
 
@@ -136,7 +152,9 @@ curl -s -X POST localhost:8000/api/solve/shortest \
 
 ```
 qsb-studio/
-├── app.py                 # 标准库 HTTP 服务器 + 桌面模式（单实例、自动开浏览器、自动退出）
+├── app.py                 # 标准库 HTTP 服务器；桌面 / 原生窗口 / 嵌入模式
+├── native_mac.py          # macOS 原生窗口（WKWebView）
+├── vendor/rubicon/        # rubicon-objc（仅 macOS 原生窗口使用）
 ├── qsb/
 │   ├── api.py             # 请求校验、错误处理（与 Web 框架无关）
 │   ├── modules.py         # 模块注册表
@@ -146,9 +164,9 @@ qsb-studio/
 │   ├── graphviz.py        # 网络图布局（圆环 / 二分 / 分层 / 树）
 │   ├── explain.py         # 教学文案
 │   └── <id>.py            # 19 个求解模块
-├── static/                # 前端（原生 JS，无构建步骤）：演示播放器、SVG 网络图、Canvas 图表
+├── static/                # 前端（原生 JS，无构建步骤）：工作台布局、演示播放器、SVG 网络图、Canvas 图表
 ├── tests/                 # 单元测试与对拍测试
-├── packaging/             # 打包脚本、Go 启动器、图标
+├── packaging/             # 打包脚本、Go 启动器（含 WebView2 窗口）、图标
 └── .github/workflows/     # CI 与自动发布
 ```
 
